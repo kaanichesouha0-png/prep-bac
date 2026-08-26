@@ -1,51 +1,15 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import "./index.css";
 import { createClient } from "@supabase/supabase-js";
-import { GoogleGenAI } from "@google/genai";
+import { SECTIONS, OPTIONS, TECHNIQUE_TRACKS, getProgramForUser, countChapters, normalizeSection } from "./curriculum";
+import { askGemini, bacTutorPrompt } from "./gemini";
 
-// Configuration Supabase (Remplace par tes vraies clés si nécessaire)
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "https://bvxmfqpnkqxpueuwkavg.supabase.co";
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_WCWXfcuocbjrVA6LTK6H8w_gwZGMdLt";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-// Initialisation de Gemini avec ta clé API
-const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
-
-const ADMIN_EMAIL = "souha.admin@gmail.com";
+const ADMIN_EMAIL = (import.meta.env.VITE_ADMIN_EMAIL || "souha.admin@gmail.com").toLowerCase();
 const TARGET_DATE = new Date("2027-06-07T08:00:00").getTime();
-
-const mathProgram = [
-  {
-    category: "Géométrie & Arithmétique",
-    chapters: [
-      { id: "geo_1", title: "Nombres complexes" },
-      { id: "geo_2", title: "Isométries du plan" },
-      { id: "geo_3", title: "Déplacements - Antidéplacements" },
-      { id: "geo_4", title: "Similitudes" },
-      { id: "geo_5", title: "Coniques" },
-      { id: "geo_6", title: "Géométrie dans l'espace" },
-      { id: "geo_7", title: "Divisibilité dans Z" },
-      { id: "geo_8", title: "Identité de Bézout" },
-      { id: "geo_9", title: "Probabilités" },
-      { id: "geo_10", title: "Statistiques" },
-    ],
-  },
-  {
-    category: "Algèbre & Analyse",
-    chapters: [
-      { id: "alg_1", title: "Continuité et limites" },
-      { id: "alg_2", title: "Suites réelles" },
-      { id: "alg_3", title: "Dérivabilité" },
-      { id: "alg_4", title: "Fonctions réciproques" },
-      { id: "alg_5", title: "Études de fonctions" },
-      { id: "alg_6", title: "Primitives" },
-      { id: "alg_7", title: "Intégrales" },
-      { id: "alg_8", title: "Fonction logarithme népérien" },
-      { id: "alg_9", title: "Fonction exponentielle" },
-      { id: "alg_10", title: "Équations différentielles" },
-    ],
-  },
-];
 
 const randomQuestions = [
   "Prête pour ta session ?",
@@ -97,12 +61,24 @@ export default function App() {
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [section, setSection] = useState("Mathématiques");
+  const [option, setOption] = useState("Aucune");
+  const [techniqueTrack, setTechniqueTrack] = useState("Mécanique");
   const [isSignUp, setIsSignUp] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [openSubjects, setOpenSubjects] = useState({});
+  const [chapterQuery, setChapterQuery] = useState("");
+  const [adminQuery, setAdminQuery] = useState("");
+  const [savingProfile, setSavingProfile] = useState(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
+      const meta = session?.user?.user_metadata || {};
+      if (meta.section) setSection(normalizeSection(meta.section));
+      if (meta.option) setOption(meta.option);
+      if (meta.technique_track) setTechniqueTrack(meta.technique_track);
+      if (meta.first_name) setFirstName(meta.first_name);
+      if (meta.last_name) setLastName(meta.last_name);
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
@@ -122,9 +98,15 @@ export default function App() {
           first_name: metadata.first_name || "Inconnu",
           last_name: metadata.last_name || "",
           section: metadata.section || "Mathématiques",
+          option: metadata.option || "Aucune",
+          technique_track: metadata.technique_track || "",
           last_seen: new Date().toISOString()
         };
-        await supabase.from('user_logs').upsert([logData], { onConflict: 'email' });
+        const { error } = await supabase.from("user_logs").upsert([logData], { onConflict: "email" });
+        if (error) {
+          const { option: _o, technique_track: _t, ...fallback } = logData;
+          await supabase.from("user_logs").upsert([fallback], { onConflict: "email" });
+        }
       }
     }
     logUserConnection();
@@ -138,7 +120,13 @@ export default function App() {
         email: authEmail,
         password: authPassword,
         options: {
-          data: { first_name: firstName, last_name: lastName, section: section }
+          data: {
+            first_name: firstName,
+            last_name: lastName,
+            section,
+            option,
+            technique_track: section === "Techniques" ? techniqueTrack : "",
+          }
         }
       });
       if (error) setAuthError(error.message);
@@ -152,6 +140,11 @@ export default function App() {
   const userId = session?.user?.id || "local_user";
   const userMetadata = session?.user?.user_metadata || {};
   const currentFirstName = userMetadata.first_name || firstName || "Souha";
+  const currentSection = normalizeSection(userMetadata.section || section);
+  const currentOption = userMetadata.option || option || "Aucune";
+  const currentTrack = userMetadata.technique_track || techniqueTrack;
+  const isAdmin = (session?.user?.email || "").toLowerCase() === ADMIN_EMAIL;
+  const userProgram = getProgramForUser(currentSection, currentOption, currentTrack);
 
   const [activeTab, setActiveTab] = useState("home");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -255,34 +248,38 @@ export default function App() {
 
     const userText = chatInput.trim();
     const currentImg = attachedImage;
-
     const userMsg = { id: Date.now(), sender: "user", text: userText, image: currentImg };
-    setChatMessages((prev) => [...prev, userMsg]);
+    const history = [...chatMessages, userMsg];
+    setChatMessages(history);
     setChatInput("");
     setAttachedImage(null);
     setLoadingChat(true);
 
     try {
-      let promptContent = userText;
-      let modelToUse = 'gemini-1.5-flash';
-
-      // Si l'utilisateur demande de générer des flashcards
-      if (userText.toLowerCase().includes("flashcard") || userText.toLowerCase().includes("génère des flashcards")) {
-        promptContent = `À partir de ce texte ou sujet "${userText}", génère 3 flashcards sous format JSON strict avec un tableau d'objets ayant les clés "q" (question) et "a" (réponse).`;
-      }
-
-      const response = await ai.models.generateContent({
-        model: modelToUse,
-        contents: promptContent,
+      const botReply = await askGemini({
+        messages: history,
+        systemInstruction: bacTutorPrompt({
+          firstName: currentFirstName,
+          section: currentSection,
+          option: currentOption,
+          techniqueTrack: currentSection === "Techniques" ? currentTrack : "",
+        }),
       });
 
-      const botReply = response.text || "Désolé, je n'ai pas pu générer de réponse.";
-
-      // Si le bot a généré des flashcards, on les ajoute automatiquement à la liste
-      if (userText.toLowerCase().includes("flashcard") && botReply.includes("q")) {
+      if (userText.toLowerCase().includes("flashcard")) {
         try {
-          // Extraction basique ou ajout direct
-          setFlashcardsList(prev => [...prev, { id: Date.now(), q: "Générée par Gemini : " + userText, a: botReply }]);
+          const match = botReply.match(/\[[\s\S]*\]/);
+          if (match) {
+            const cards = JSON.parse(match[0]);
+            if (Array.isArray(cards)) {
+              setFlashcardsList((prev) => [
+                ...prev,
+                ...cards
+                  .filter((c) => c && c.q && c.a)
+                  .map((c, i) => ({ id: Date.now() + i, q: String(c.q), a: String(c.a) })),
+              ]);
+            }
+          }
         } catch (err) {
           console.log("Erreur parsing flashcards", err);
         }
@@ -291,10 +288,39 @@ export default function App() {
       setChatMessages((prev) => [...prev, { id: Date.now() + 1, sender: "bot", text: botReply }]);
     } catch (error) {
       console.error("Erreur Gemini:", error);
-      setChatMessages((prev) => [...prev, { id: Date.now() + 1, sender: "bot", text: "Oups, une erreur est survenue avec Gemini." }]);
+      const detail = error?.message || "erreur inconnue";
+      setChatMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now() + 1,
+          sender: "bot",
+          text: `Oups, Gemini n'a pas répondu : ${detail}`,
+        },
+      ]);
     } finally {
       setLoadingChat(false);
     }
+  }
+
+  async function saveSchoolProfile(e) {
+    e.preventDefault();
+    setSavingProfile(true);
+    const { error } = await supabase.auth.updateUser({
+      data: {
+        first_name: userMetadata.first_name || firstName,
+        last_name: userMetadata.last_name || lastName,
+        section,
+        option,
+        technique_track: section === "Techniques" ? techniqueTrack : "",
+      },
+    });
+    setSavingProfile(false);
+    if (error) {
+      alert(error.message);
+      return;
+    }
+    const { data } = await supabase.auth.getSession();
+    if (data?.session) setSession(data.session);
   }
 
   const [courses, setCourses] = useState(() => loadStorage(`bac_courses_${userId}`, []));
@@ -334,7 +360,7 @@ export default function App() {
   const [userLogs, setUserLogs] = useState([]);
   useEffect(() => {
     async function fetchLogs() {
-      if (session?.user?.email === ADMIN_EMAIL) {
+      if (isAdmin) {
         const { data, error } = await supabase.from('user_logs').select('*');
         if (!error && data) setUserLogs(data);
       }
@@ -356,7 +382,7 @@ export default function App() {
     { id: "mood", icon: "🧠", label: "Journal & Conseil" },
     { id: "grades", icon: "📊", label: "Mes Notes" },
     { id: "chapters", icon: "📚", label: "Chapitres & Points Faibles" },
-    ...(session?.user?.email === ADMIN_EMAIL ? [{ id: "admin", icon: "🛠️", label: "Espace Admin" }] : []),
+    ...(isAdmin ? [{ id: "admin", icon: "🛠️", label: "Espace Admin" }] : []),
   ];
 
   const presetThemes = [
@@ -667,15 +693,22 @@ export default function App() {
                   onChange={(e) => setLastName(e.target.value)}
                   required
                 />
-                <select
-                  className="input"
-                  value={section}
-                  onChange={(e) => setSection(e.target.value)}
-                >
-                  <option value="Mathématiques">Mathématiques</option>
-                  <option value="Sciences Expérimentales">Sciences Expérimentales</option>
-                  <option value="Techniques">Techniques</option>
-                  <option value="Économie & Gestion">Économie & Gestion</option>
+                <select className="input" value={section} onChange={(e) => setSection(e.target.value)} required>
+                  {SECTIONS.map((sec) => (
+                    <option key={sec.id} value={sec.id}>{sec.label}</option>
+                  ))}
+                </select>
+                {section === "Techniques" && (
+                  <select className="input" value={techniqueTrack} onChange={(e) => setTechniqueTrack(e.target.value)}>
+                    {TECHNIQUE_TRACKS.map((t) => (
+                      <option key={t.id} value={t.id}>{t.label}</option>
+                    ))}
+                  </select>
+                )}
+                <select className="input" value={option} onChange={(e) => setOption(e.target.value)} required>
+                  {OPTIONS.map((opt) => (
+                    <option key={opt.id} value={opt.id}>{opt.label}</option>
+                  ))}
                 </select>
               </>
             )}
@@ -750,6 +783,38 @@ export default function App() {
             <div className="hero-card">
               <h1>Bonjour {currentFirstName} 👋</h1>
               <p>{greetingQuestion}</p>
+              <p className="muted" style={{ marginTop: "10px" }}>
+                Section {currentSection}
+                {currentSection === "Techniques" && currentTrack ? ` · ${currentTrack}` : ""}
+                {currentOption && currentOption !== "Aucune" ? ` · option ${currentOption}` : ""}
+              </p>
+            </div>
+
+            <div className="glass-card" style={{ marginTop: "20px" }}>
+              <h3>🎓 Ma filière</h3>
+              <p className="muted">Modifie ta section et ton option — le programme des points faibles s'adapte.</p>
+              <form onSubmit={saveSchoolProfile} className="form-grid" style={{ marginTop: "12px" }}>
+                <select className="input" value={section} onChange={(e) => setSection(e.target.value)}>
+                  {SECTIONS.map((sec) => (
+                    <option key={sec.id} value={sec.id}>{sec.label}</option>
+                  ))}
+                </select>
+                {section === "Techniques" && (
+                  <select className="input" value={techniqueTrack} onChange={(e) => setTechniqueTrack(e.target.value)}>
+                    {TECHNIQUE_TRACKS.map((t) => (
+                      <option key={t.id} value={t.id}>{t.label}</option>
+                    ))}
+                  </select>
+                )}
+                <select className="input" value={option} onChange={(e) => setOption(e.target.value)}>
+                  {OPTIONS.map((opt) => (
+                    <option key={opt.id} value={opt.id}>{opt.label}</option>
+                  ))}
+                </select>
+                <button className="btn primary" disabled={savingProfile}>
+                  {savingProfile ? "Enregistrement..." : "Enregistrer"}
+                </button>
+              </form>
             </div>
 
             <h2 className="section-title">Personnalise ton thème</h2>
@@ -798,21 +863,17 @@ export default function App() {
                 ✨ Nouveau chat
               </button>
             </div>
-            <p className="muted">Pose tes questions, envoie une photo de cours ou demande de générer des flashcards.</p>
+            <p className="muted">Pose tes questions sans limite de longueur, envoie une photo d'exercice, ou demande des flashcards. L'assistant connaît ta section ({currentSection}).</p>
 
-            <div className="chat-box">
+            <div className="chat-container">
               {chatMessages.map((msg) => (
-                <div key={msg.id} className={`chat-message ${msg.sender}`}>
-                  <div className="bubble">
-                    {msg.image && <img src={msg.image} alt="Exercice" className="chat-uploaded-img" />}
-                    <p style={{ whiteSpace: "pre-wrap" }}>{msg.text}</p>
-                  </div>
+                <div key={msg.id} className={`chat-bubble ${msg.sender === "user" ? "user-message" : "bot-message"}`}>
+                  {msg.image && <img src={msg.image} alt="Exercice" className="chat-uploaded-img" />}
+                  <p style={{ whiteSpace: "pre-wrap", margin: 0 }}>{msg.text}</p>
                 </div>
               ))}
               {loadingChat && (
-                <div className="chat-message bot">
-                  <div className="bubble animate-pulse">Gemini réfléchit... 🧠</div>
-                </div>
+                <div className="chat-bubble bot-message">Gemini réfléchit... 🧠</div>
               )}
               <div ref={chatBottomRef} />
             </div>
@@ -848,12 +909,13 @@ export default function App() {
                 🎤
               </button>
 
-              <input
-                className="input"
-                placeholder={isListening ? "Écoute en cours..." : "Pose ta question à Gemini..."}
+              <textarea
+                className="input chat-textarea"
+                rows={2}
+                placeholder={isListening ? "Écoute en cours..." : "Pose ta question à Gemini (pas de limite de longueur)..."}
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
-                style={{ flex: 1 }}
+                style={{ flex: 1, resize: "vertical", minHeight: "44px" }}
               />
               <button className="btn primary" disabled={loadingChat}>Envoyer</button>
             </form>
@@ -1394,68 +1456,119 @@ export default function App() {
         {/* CHAPITRES & POINTS FAIBLES */}
         {activeTab === "chapters" && (
           <section className="glass-card animate-fade-in">
-            <h2 className="view-title">📚 Programme de Maths & Points Faibles</h2>
-            <p className="muted">Coche les chapitres où tu as besoin de renforcer tes révisions.</p>
+            <h2 className="view-title">📚 Programme & points faibles</h2>
+            <p className="muted">
+              Programme de la section <strong>{currentSection}</strong>
+              {currentSection === "Techniques" && currentTrack ? ` (${currentTrack})` : ""}
+              {currentOption && currentOption !== "Aucune" ? ` · option ${currentOption}` : ""}.
+              {" "}{countChapters(userProgram)} chapitres · {weakChapters.length} à renforcer.
+            </p>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px", marginTop: "20px" }}>
-              {mathProgram.map((cat, idx) => (
-                <div key={idx} style={{ background: "var(--card-bg)", padding: "15px", borderRadius: "12px", border: "1px solid var(--border)" }}>
-                  <h3>{cat.category}</h3>
-                  <div style={{ marginTop: "10px" }}>
-                    {cat.chapters.map((ch) => {
-                      const isWeak = weakChapters.includes(ch.id);
-                      return (
-                        <label key={ch.id} style={{ display: "flex", alignItems: "center", gap: "8px", margin: "8px 0", cursor: "pointer" }}>
-                          <input
-                            type="checkbox"
-                            checked={isWeak}
-                            onChange={() => {
-                              setWeakChapters((prev) =>
-                                isWeak ? prev.filter((id) => id !== ch.id) : [...prev, ch.id]
-                              );
-                            }}
-                          />
-                          <span style={{ fontSize: "14px", color: isWeak ? "var(--accent)" : "inherit" }}>{ch.title}</span>
-                          {isWeak && <span style={{ fontSize: "10px", background: "var(--accent)", color: "#fff", padding: "2px 6px", borderRadius: "4px" }}>À renforcer</span>}
-                        </label>
-                      );
-                    })}
+            <input
+              className="input"
+              placeholder="Rechercher un chapitre ou une matière..."
+              value={chapterQuery}
+              onChange={(e) => setChapterQuery(e.target.value)}
+              style={{ margin: "16px 0" }}
+            />
+
+            <div className="subject-stack">
+              {userProgram.map((subject) => {
+                const q = chapterQuery.trim().toLowerCase();
+                const chapters = subject.chapters.filter((ch) => {
+                  if (!q) return true;
+                  return (
+                    ch.title.toLowerCase().includes(q) ||
+                    subject.name.toLowerCase().includes(q)
+                  );
+                });
+                if (!chapters.length) return null;
+                const weakCount = chapters.filter((ch) => weakChapters.includes(ch.id)).length;
+                const opened = openSubjects[subject.id] ?? true;
+                return (
+                  <div className="subject-card" key={subject.id}>
+                    <button
+                      type="button"
+                      className="subject-header"
+                      onClick={() => setOpenSubjects((prev) => ({ ...prev, [subject.id]: !opened }))}
+                    >
+                      <span>{subject.icon} {subject.name}</span>
+                      <span className="muted">{weakCount}/{chapters.length} · {opened ? "▾" : "▸"}</span>
+                    </button>
+                    {opened && (
+                      <div className="chapter-list">
+                        {chapters.map((ch) => {
+                          const isWeak = weakChapters.includes(ch.id);
+                          return (
+                            <label key={ch.id} className={`chapter-row ${isWeak ? "is-weak" : ""}`}>
+                              <input
+                                type="checkbox"
+                                checked={isWeak}
+                                onChange={() => {
+                                  setWeakChapters((prev) =>
+                                    isWeak ? prev.filter((id) => id !== ch.id) : [...prev, ch.id]
+                                  );
+                                }}
+                              />
+                              <span>{ch.title}</span>
+                              {isWeak && <em>À renforcer</em>}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </section>
         )}
 
         {/* ESPACE ADMIN (SÉCURISÉ UNIQUEMENT POUR TON GMAIL) */}
-        {activeTab === "admin" && session?.user?.email === ADMIN_EMAIL && (
+        {activeTab === "admin" && isAdmin && (
           <section className="glass-card animate-fade-in">
-            <h2 className="view-title">🛠️ Panneau d'Administration</h2>
-            <p className="muted">Liste de toutes les personnes inscrites et connectées sur l'application :</p>
-
-            <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-md overflow-hidden border border-gray-200 dark:border-gray-700" style={{ marginTop: "20px" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left" }}>
+            <h2 className="view-title">🛠️ Panneau d'administration</h2>
+            <p className="muted">Réservé à {ADMIN_EMAIL}. {userLogs.length} compte(s) enregistré(s).</p>
+            <input
+              className="input"
+              placeholder="Filtrer par nom, email, section, option..."
+              value={adminQuery}
+              onChange={(e) => setAdminQuery(e.target.value)}
+              style={{ margin: "16px 0" }}
+            />
+            <div className="admin-table-wrap">
+              <table className="admin-table">
                 <thead>
-                  <tr style={{ background: "rgba(0,0,0,0.05)", fontSize: "12px", textTransform: "uppercase" }}>
-                    <th style={{ padding: "12px" }}>Prénom & Nom</th>
-                    <th style={{ padding: "12px" }}>Email</th>
-                    <th style={{ padding: "12px" }}>Section</th>
-                    <th style={{ padding: "12px" }}>Dernière connexion</th>
+                  <tr>
+                    <th>Prénom & Nom</th>
+                    <th>Email</th>
+                    <th>Section</th>
+                    <th>Option</th>
+                    <th>Dernière connexion</th>
                   </tr>
                 </thead>
-                <tbody style={{ fontSize: "14px" }}>
-                  {userLogs.length > 0 ? (
-                    userLogs.map((log, index) => (
-                      <tr key={index} style={{ borderTop: "1px solid var(--border)" }}>
-                        <td style={{ padding: "12px", fontWeight: "bold" }}>{log.first_name} {log.last_name}</td>
-                        <td style={{ padding: "12px", opacity: 0.8 }}>{log.email}</td>
-                        <td style={{ padding: "12px" }}>{log.section}</td>
-                        <td style={{ padding: "12px", fontSize: "12px", opacity: 0.6 }}>{new Date(log.last_seen).toLocaleString("fr-FR")}</td>
+                <tbody>
+                  {userLogs
+                    .filter((log) => {
+                      const q = adminQuery.trim().toLowerCase();
+                      if (!q) return true;
+                      return [log.first_name, log.last_name, log.email, log.section, log.option, log.technique_track]
+                        .join(" ")
+                        .toLowerCase()
+                        .includes(q);
+                    })
+                    .map((log, index) => (
+                      <tr key={log.email || index}>
+                        <td><strong>{log.first_name} {log.last_name}</strong></td>
+                        <td>{log.email}</td>
+                        <td>{log.section}{log.technique_track ? ` · ${log.technique_track}` : ""}</td>
+                        <td>{log.option || "—"}</td>
+                        <td>{log.last_seen ? new Date(log.last_seen).toLocaleString("fr-FR") : "—"}</td>
                       </tr>
-                    ))
-                  ) : (
+                    ))}
+                  {userLogs.length === 0 && (
                     <tr>
-                      <td colSpan="4" style={{ padding: "20px", textAlign: "center", opacity: 0.6 }}>Aucun utilisateur enregistré pour le moment...</td>
+                      <td colSpan="5" style={{ padding: "20px", textAlign: "center", opacity: 0.6 }}>Aucun utilisateur enregistré pour le moment...</td>
                     </tr>
                   )}
                 </tbody>
