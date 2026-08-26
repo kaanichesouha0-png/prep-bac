@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import "./index.css";
 import { createClient } from "@supabase/supabase-js";
 import { SECTIONS, OPTIONS, TECHNIQUE_TRACKS, getProgramForUser, countChapters, normalizeSection } from "./curriculum";
-import { askGemini, bacTutorPrompt } from "./gemini";
+import { askGemini, bacTutorPrompt, parseFlashcardsJson } from "./gemini";
 
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "https://bvxmfqpnkqxpueuwkavg.supabase.co";
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_WCWXfcuocbjrVA6LTK6H8w_gwZGMdLt";
@@ -266,23 +266,9 @@ export default function App() {
         }),
       });
 
-      if (userText.toLowerCase().includes("flashcard")) {
-        try {
-          const match = botReply.match(/\[[\s\S]*\]/);
-          if (match) {
-            const cards = JSON.parse(match[0]);
-            if (Array.isArray(cards)) {
-              setFlashcardsList((prev) => [
-                ...prev,
-                ...cards
-                  .filter((c) => c && c.q && c.a)
-                  .map((c, i) => ({ id: Date.now() + i, q: String(c.q), a: String(c.a) })),
-              ]);
-            }
-          }
-        } catch (err) {
-          console.log("Erreur parsing flashcards", err);
-        }
+      const autoCards = parseFlashcardsJson(botReply);
+      if (autoCards.length) {
+        setFlashcardsList((prev) => [...prev, ...autoCards]);
       }
 
       setChatMessages((prev) => [...prev, { id: Date.now() + 1, sender: "bot", text: botReply }]);
@@ -340,6 +326,10 @@ export default function App() {
   const [isFlipped, setIsFlipped] = useState(false);
   const [newCardQ, setNewCardQ] = useState("");
   const [newCardA, setNewCardA] = useState("");
+  const [fcSubjectId, setFcSubjectId] = useState("");
+  const [fcChapterId, setFcChapterId] = useState("");
+  const [fcLoading, setFcLoading] = useState(false);
+  const [fcError, setFcError] = useState("");
 
   function addFlashcard(e) {
     e.preventDefault();
@@ -347,6 +337,48 @@ export default function App() {
     setFlashcardsList(prev => [...prev, { id: Date.now(), q: newCardQ.trim(), a: newCardA.trim() }]);
     setNewCardQ("");
     setNewCardA("");
+  }
+
+  const fcSubject = userProgram.find((x) => x.id === fcSubjectId) || userProgram[0];
+  const fcChapters = fcSubject?.chapters || [];
+  const fcChapter = fcChapters.find((c) => c.id === fcChapterId) || fcChapters[0];
+
+  async function generateCourseFlashcards() {
+    if (!fcSubject || !fcChapter || fcLoading) return;
+    setFcError("");
+    setFcLoading(true);
+    try {
+      const prompt = `Génère 8 flashcards de révision bac tunisien.
+Section : ${currentSection}.
+Matière : ${fcSubject.name}.
+Chapitre : ${fcChapter.title}.
+Réponds UNIQUEMENT avec un JSON : tableau de 8 objets {"q":"question courte","a":"réponse claire"}.
+Couvre définitions, formules, méthodes et pièges d'examen.`;
+      const reply = await askGemini({
+        messages: [{ sender: "user", text: prompt }],
+        systemInstruction: bacTutorPrompt({
+          firstName: currentFirstName,
+          section: currentSection,
+          option: currentOption,
+          techniqueTrack: currentSection === "Techniques" ? currentTrack : "",
+        }),
+      });
+      const cards = parseFlashcardsJson(reply).map((c) => ({
+        ...c,
+        q: `[${fcSubject.name} · ${fcChapter.title}] ${c.q}`,
+      }));
+      if (!cards.length) {
+        setFcError("Gemini n'a pas renvoyé de flashcards lisibles. Réessaie.");
+      } else {
+        setFlashcardsList((prev) => [...prev, ...cards]);
+        setCurrentCardIndex(0);
+        setIsFlipped(false);
+      }
+    } catch (err) {
+      setFcError(err.message || "Impossible de générer les flashcards.");
+    } finally {
+      setFcLoading(false);
+    }
   }
 
   function deleteFlashcard(id) {
@@ -926,7 +958,38 @@ export default function App() {
         {activeTab === "flashcards" && (
           <section className="glass-card animate-fade-in">
             <h2 className="view-title">🎴 Flashcards de Révision</h2>
-            <p className="muted">Révise tes formules, ajoute de nouvelles cartes ou supprime celles maîtrisées.</p>
+            <p className="muted">Choisis une matière et un chapitre de ton programme : l'app génère des cartes adaptées.</p>
+
+            <div className="smart-form" style={{ marginTop: "16px" }}>
+              <h3>✨ Générer depuis un cours</h3>
+              <div className="form-grid">
+                <select
+                  className="input"
+                  value={fcSubject?.id || ""}
+                  onChange={(e) => {
+                    setFcSubjectId(e.target.value);
+                    setFcChapterId("");
+                  }}
+                >
+                  {userProgram.map((sub) => (
+                    <option key={sub.id} value={sub.id}>{sub.icon} {sub.name}</option>
+                  ))}
+                </select>
+                <select
+                  className="input"
+                  value={fcChapter?.id || ""}
+                  onChange={(e) => setFcChapterId(e.target.value)}
+                >
+                  {fcChapters.map((c) => (
+                    <option key={c.id} value={c.id}>{c.title}</option>
+                  ))}
+                </select>
+                <button type="button" className="btn primary" onClick={generateCourseFlashcards} disabled={fcLoading}>
+                  {fcLoading ? "Génération..." : "Générer 8 flashcards"}
+                </button>
+              </div>
+              {fcError && <p style={{ color: "#ef4444", marginTop: "8px" }}>{fcError}</p>}
+            </div>
 
             <form onSubmit={addFlashcard} style={{ display: "flex", gap: "10px", margin: "20px 0" }}>
               <input

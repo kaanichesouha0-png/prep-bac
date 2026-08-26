@@ -1,4 +1,26 @@
-const MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest", "gemini-2.5-flash-lite"];
+const MODELS = [
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-flash",
+  "gemini-3.7-flash",
+  "gemini-flash-latest",
+];
+
+export const maxDuration = 30;
+
+function extractText(data) {
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  return parts.map((p) => p.text || "").join("").trim();
+}
+
+async function fetchWithTimeout(url, options, ms) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...options, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -18,8 +40,7 @@ export default async function handler(req, res) {
   const key = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY;
   if (!key) {
     res.status(500).json({
-      error:
-        "Clé Gemini manquante côté serveur. Ajoute GEMINI_API_KEY dans Vercel → Settings → Environment Variables.",
+      error: "Clé Gemini manquante. Ajoute GEMINI_API_KEY dans Vercel (Settings → Environment Variables) puis Redeploy.",
     });
     return;
   }
@@ -35,28 +56,33 @@ export default async function handler(req, res) {
     try {
       const body = {
         contents,
-        generationConfig: { temperature: 0.7, maxOutputTokens: 8192 },
+        generationConfig: {
+          temperature: 0.6,
+          maxOutputTokens: 4096,
+          thinkingConfig: { thinkingBudget: 0 },
+        },
       };
       if (systemInstruction) {
         body.system_instruction = { parts: [{ text: systemInstruction }] };
       }
-      const r = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,
+      const r = await fetchWithTimeout(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": key,
+          },
           body: JSON.stringify(body),
-        }
+        },
+        12000
       );
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
         lastError = data?.error?.message || `HTTP ${r.status} (${model})`;
         continue;
       }
-      const text = (data?.candidates?.[0]?.content?.parts || [])
-        .map((p) => p.text || "")
-        .join("")
-        .trim();
+      const text = extractText(data);
       if (!text) {
         lastError = `Réponse vide (${model})`;
         continue;
@@ -64,7 +90,7 @@ export default async function handler(req, res) {
       res.status(200).json({ text, model });
       return;
     } catch (err) {
-      lastError = err.message || String(err);
+      lastError = err.name === "AbortError" ? `Timeout (${model})` : err.message || String(err);
     }
   }
 
